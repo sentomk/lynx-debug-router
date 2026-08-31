@@ -1,8 +1,17 @@
 # DebugRouter Roadmap
 
-Status: proposed direction; implementation has not started.
+Status: Android-first native lifecycle foundation implemented; the wider SDK
+design remains proposed.
 
 Updated: 2026-08-31.
+
+Current slice: a C++17 `SessionRegistry` with typed, registry-local handles,
+idempotent attach per live peer-target pair, ownership-checked detach, and scoped
+endpoint cleanup that returns closed relationship snapshots. It has deterministic
+host tests and Android NDK builds; it does not yet provide JNI, transports, CDP
+correlation, subscriptions, or backend integration. See the [README](../README.md)
+for the lifecycle contract and build instructions. ECS remains a design mindset,
+not an imposed module structure.
 
 ## Direction and scope
 
@@ -135,14 +144,15 @@ ownership rules, and observable outcomes of each operation.
 | Target is removed | End its attachments and identify affected peers for notification |
 
 Specify duplicate operations, invalid endpoints, repeated close operations, and
-stale handles. Decide whether repeated attach requests for the same peer and
-target create independent relationships or reuse one. Derive the first module
+stale handles. The first implementation reuses an attachment for repeated requests
+on the same live peer-target pair; after detach it issues a fresh ID. Derive module
 boundaries from these rules rather than prescribing a generic relationship layer.
 
 Completion evidence: a coherent transition specification and test scenarios in
 which A and B attach to one target, A leaves without invalidating B, the target
-is destroyed, and B's old attachment can no longer be used. This is the next
-design task before implementation.
+is destroyed, and B's old attachment can no longer be used. The first slice covers
+these transitions and documents their contract in the public API and README;
+transport identity binding and target access policy remain outside it.
 
 ### 2. Implement a deterministic in-memory SDK foundation
 
@@ -156,6 +166,10 @@ at the integration boundary rather than making state storage start threads.
 Completion evidence: unit tests cover the lifecycle specification, relationship
 consistency, ownership checks, duplicate operations, and stale-instance rejection.
 The implementation has no embedded transport or backend side effects.
+
+The initial `SessionRegistry` implements this in-memory scope using ordinary
+containers. Request cleanup and client notifications are future consumers of its
+closure results, not side effects performed by the registry.
 
 ### 3. Add request correlation and event delivery
 
@@ -251,8 +265,9 @@ explicitly rather than inferred from the architecture.
 
 - The initial target inventory and how Views, runtimes, and App-level capabilities
   relate to one another.
-- Attachment cardinality, access rules, subscription defaults, and the boundary
-  between target availability and frontend interest.
+- Whether later use cases require multiple attachments for one peer-target pair;
+  the current slice uses one. Access rules, subscription defaults, and the boundary
+  between target availability and frontend interest also need further design.
 - Identity scopes and generations across peers, target instances, transport
   channels, and backend request IDs.
 - Which debugging capabilities are shared, aggregated, or exclusive, and how a
