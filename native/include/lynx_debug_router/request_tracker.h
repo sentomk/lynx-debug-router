@@ -1,6 +1,7 @@
 #ifndef LYNX_DEBUG_ROUTER_REQUEST_TRACKER_H_
 #define LYNX_DEBUG_ROUTER_REQUEST_TRACKER_H_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -12,6 +13,8 @@
 namespace lynx::debug_router {
 
 enum class BackendRequestId : std::int32_t { kInvalid = 0 };
+
+using RequestTime = std::chrono::steady_clock::time_point;
 
 struct RequestTrackerLimits {
   std::size_t max_pending = 0;
@@ -40,6 +43,16 @@ struct PendingRequest {
   BackendRequestId backend_id;
   Attachment attachment;
   std::int64_t original_id;
+  RequestTime deadline;
+};
+
+enum class RequestEndReason { kAbandoned, kTimedOut, kAttachmentClosed };
+
+// Cleanup metadata, not permission to send. Check attachment liveness before
+// notifying a client; kAttachmentClosed records must not be delivered.
+struct EndedRequest {
+  PendingRequest request;
+  RequestEndReason reason;
 };
 
 // One tracker owns the ID space of one shared backend channel, potentially
@@ -63,14 +76,33 @@ class RequestTracker final {
   // peer comes from trusted connection context. Requires a live, owned
   // attachment and rejects duplicate original IDs pending on that attachment.
   // The protocol adapter validates the frontend ID's wire representation.
+  // Supply an absolute monotonic deadline. This does not read a clock or reject
+  // past deadlines: only Expire enforces them, including deadline == now.
   [[nodiscard]] TrackResult Track(PeerId peer, AttachmentId attachment,
-                                  std::int64_t original_id);
+                                  std::int64_t original_id,
+                                  RequestTime deadline);
 
   // Consumes one pending response and returns a route snapshot only while the
   // attachment is still live. Unknown, duplicate, and stale responses return
   // nullopt, never a broadcast destination. Use the result in the same serial
-  // turn, or revalidate it before deferred delivery.
+  // turn, or revalidate it before deferred delivery. This does not check time;
+  // call Expire first if deadlines must take precedence over queued responses.
   [[nodiscard]] std::optional<PendingRequest> Complete(BackendRequestId id);
+
+  // Trusted owner operation, e.g. after a send failure, not a frontend cancel
+  // API. Consumes one request without closing its attachment or canceling the
+  // backend. Unknown/already-ended IDs return nullopt. A closed attachment
+  // yields kAttachmentClosed instead of kAbandoned, even if Invalidate was
+  // missed.
+  [[nodiscard]] std::optional<EndedRequest> Abandon(BackendRequestId id);
+
+  // Consume every request with deadline <= now, in backend-ID order, returning
+  // kTimedOut or kAttachmentClosed if the registry already closed the
+  // attachment. The caller supplies time from the same monotonic clock as Track
+  // deadlines. No clock reads, timer, retry, or I/O. State is updated before
+  // results return; repeated calls do not produce another ending for an
+  // already-ended request.
+  [[nodiscard]] std::vector<EndedRequest> Expire(RequestTime now);
 
   // Consume a closure result from the bound registry. Returns removed requests
   // in backend-ID order, after state is updated. Failed/repeated closures are
@@ -78,11 +110,14 @@ class RequestTracker final {
   [[nodiscard]] std::vector<PendingRequest> Invalidate(
       const CloseResult& closure);
 
-  // Includes stale records until Invalidate or Complete removes them. The owner
-  // must promptly consume registry closures to release their capacity.
+  // Includes stale and overdue records until explicitly consumed. The owner
+  // must drive Expire and promptly consume registry closures to release
+  // capacity.
   [[nodiscard]] std::size_t PendingCount() const;
 
  private:
+  bool IsLive(const PendingRequest& request) const;
+
   const SessionRegistry& registry_;
   const RequestTrackerLimits limits_;
   // Wider than the wire ID so incrementing INT32_MAX cannot overflow.

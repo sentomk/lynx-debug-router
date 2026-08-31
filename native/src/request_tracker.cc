@@ -9,7 +9,8 @@ RequestTracker::RequestTracker(SessionRegistry& registry,
     : registry_(registry), limits_(limits) {}
 
 TrackResult RequestTracker::Track(PeerId peer, AttachmentId attachment,
-                                  std::int64_t original_id) {
+                                  std::int64_t original_id,
+                                  RequestTime deadline) {
   if (limits_.max_pending == 0 || limits_.max_backend_id <= 0) {
     return {RequestStatus::kInvalidLimits};
   }
@@ -37,7 +38,7 @@ TrackResult RequestTracker::Track(PeerId peer, AttachmentId attachment,
   }
 
   const auto id = static_cast<BackendRequestId>(next_backend_id_);
-  pending_.emplace(id, PendingRequest{id, *current, original_id});
+  pending_.emplace(id, PendingRequest{id, *current, original_id, deadline});
   ++next_backend_id_;
   return {RequestStatus::kOk, id};
 }
@@ -49,12 +50,39 @@ std::optional<PendingRequest> RequestTracker::Complete(BackendRequestId id) {
   }
   const auto request = found->second;
   pending_.erase(found);
-  const auto current = registry_.FindAttachment(request.attachment.id);
-  if (!current || current->peer != request.attachment.peer ||
-      current->target != request.attachment.target) {
+  if (!IsLive(request)) {
     return std::nullopt;
   }
   return request;
+}
+
+std::optional<EndedRequest> RequestTracker::Abandon(BackendRequestId id) {
+  const auto found = pending_.find(id);
+  if (found == pending_.end()) {
+    return std::nullopt;
+  }
+  const auto request = found->second;
+  pending_.erase(found);
+  return EndedRequest{request, IsLive(request)
+                                   ? RequestEndReason::kAbandoned
+                                   : RequestEndReason::kAttachmentClosed};
+}
+
+std::vector<EndedRequest> RequestTracker::Expire(RequestTime now) {
+  std::vector<EndedRequest> ended;
+  // Prepare output before mutation, as in Invalidate, so allocation failure
+  // cannot partially consume pending requests when exceptions are enabled.
+  for (const auto& [id, request] : pending_) {
+    if (request.deadline <= now) {
+      ended.push_back({request, IsLive(request)
+                                    ? RequestEndReason::kTimedOut
+                                    : RequestEndReason::kAttachmentClosed});
+    }
+  }
+  for (const auto& result : ended) {
+    pending_.erase(result.request.backend_id);
+  }
+  return ended;
 }
 
 std::vector<PendingRequest> RequestTracker::Invalidate(
@@ -85,5 +113,11 @@ std::vector<PendingRequest> RequestTracker::Invalidate(
 }
 
 std::size_t RequestTracker::PendingCount() const { return pending_.size(); }
+
+bool RequestTracker::IsLive(const PendingRequest& request) const {
+  const auto current = registry_.FindAttachment(request.attachment.id);
+  return current && current->peer == request.attachment.peer &&
+         current->target == request.attachment.target;
+}
 
 }  // namespace lynx::debug_router

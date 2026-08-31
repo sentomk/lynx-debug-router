@@ -9,13 +9,14 @@ Current slice: a C++17 `SessionRegistry` with typed, registry-local handles,
 idempotent attach per live peer-target pair, ownership-checked detach, and scoped
 endpoint cleanup that returns closed relationship snapshots. A `RequestTracker`
 now validates request ownership, maps backend IDs to original frontend IDs and
-attachments, and consumes closure results to invalidate pending work. It rechecks
-attachment liveness before returning a response route and never recycles issued
-IDs within its lifetime. Both modules have deterministic host tests and Android
-NDK builds. JNI, transports, CDP parsing/rewriting, subscriptions, deadlines, and
-backend integration remain unimplemented. See the [README](../README.md) for the
-contracts and build instructions. ECS remains a design mindset, not an imposed
-module structure.
+attachments, and consumes closure results to invalidate pending work. It supports
+explicit abandonment and caller-driven expiration of monotonic deadlines. It
+rechecks attachment liveness before returning a response route and never recycles
+issued IDs within its lifetime. Both modules have deterministic host tests and
+Android NDK builds. JNI, transports, CDP parsing/rewriting, subscriptions, timer
+scheduling, and backend integration remain unimplemented. See the
+[README](../README.md) for the contracts and build instructions. ECS remains a
+design mindset, not an imposed module structure.
 
 ## Direction and scope
 
@@ -211,12 +212,23 @@ and peer or target removal while requests are pending.
 The current tracker covers the numeric correlation and lifecycle subset of this
 step, using a fake backend. Callers explicitly configure the pending capacity and
 the positive backend-ID ceiling within int32. IDs are unique across all targets
-handled by that tracker and are not reused after completion or invalidation. A
-tracker must cover the lifetime of its shared backend response source; replacing
-it requires retiring or fencing that source first. Protocol encoding, real-backend
-range validation, send failures, expiration, and event subscriptions still need
-implementation. A full pending table rejects new requests rather than growing
-without limit; it does not substitute for timeout policy.
+handled by that tracker and are not reused after any request ending. A tracker
+must cover the lifetime of its shared backend response source; replacing it
+requires retiring or fencing that source first.
+
+Each request now carries an explicit monotonic deadline. The owner can abandon a
+request after a send failure or drive `Expire(now)` to release overdue records.
+These operations return cleanup snapshots and reasons without closing attachments
+or canceling backend execution. A closed attachment takes precedence over a
+timeout/abandonment reason if invalidation was missed. Responses and local endings
+consume records at most once in serial processing order; time passing alone does
+not end a request. Explicit-time tests cover deadline boundaries and all 24
+orderings of response, abandonment, expiration, and detach/invalidation.
+
+Protocol encoding, real-backend range validation, send-failure detection, timeout
+scheduling and duration policy, client error delivery, and event subscriptions
+still need implementation. A full pending table rejects new requests rather than
+growing without limit; its owner must drive expiration to recover overdue capacity.
 
 ### 4. Integrate real targets and shared debugging behavior
 

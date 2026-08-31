@@ -59,10 +59,12 @@ metadata, not serialized messages, and leaves the registry unchanged.
 
 | Operation | Contract |
 |---|---|
-| `Track` | Validate a live peer and its attachment; allocate a backend ID and remember the original frontend ID |
+| `Track` | Validate a live peer and its attachment; allocate a backend ID and remember the original frontend ID and explicit deadline |
 | `Complete` | Consume one response ID; return its original ID and attachment/peer/target snapshot only if the attachment is still live |
+| `Abandon` | End local waiting for one backend ID, for example after a send failure; return cleanup metadata and a reason |
+| `Expire` | End requests whose deadline is at or before the supplied time; return cleanup metadata in backend-ID order |
 | `Invalidate` | Consume a successful registry closure result and remove requests for its closed attachments |
-| `PendingCount` | Return the number of stored requests, including stale records not yet consumed or invalidated |
+| `PendingCount` | Return the number of stored requests, including stale or overdue records not yet consumed |
 
 Create one tracker for each shared backend request-ID space, not one per peer or
 per target when those clients share a response channel. Supply explicit
@@ -71,24 +73,26 @@ inclusive backend-ID ceiling no larger than `INT32_MAX`. The protocol adapter
 must choose a ceiling supported by the complete backend path; an int64 API alone
 does not establish that range. Invalid limits make `Track` return `kInvalidLimits`.
 
-Backend IDs start at 1 and are never recycled by a tracker, even after completion
-or invalidation. Exhaustion returns `kIdExhausted` without altering pending work.
-There is no reset API: do not replace a tracker on a still-active backend channel
-to reclaim IDs. Retire or fence the old response source before starting a new
-tracker, so old replies cannot enter the new ID space.
+Backend IDs start at 1 and are never recycled by a tracker, even after completion,
+abandonment, expiration, or invalidation. Exhaustion returns `kIdExhausted` without
+altering pending work. There is no reset API: do not replace a tracker on a
+still-active backend channel to reclaim IDs. Retire or fence the old response
+source before starting a new tracker, so old replies cannot enter the new ID space.
 
 Original frontend IDs are preserved as int64 values; validating their wire format
 belongs to the protocol adapter. The same original ID can be pending on different
 attachments. A duplicate on the same attachment is rejected until the previous
-request completes or is invalidated. `Track` checks limits, peer existence,
-attachment existence, ownership, duplicates, capacity, then ID exhaustion, in
-that order. Rejected requests do not consume backend IDs or pending slots.
+request ends. `Track` checks limits, peer existence, attachment existence,
+ownership, duplicates, capacity, then ID exhaustion, in that order. Rejected
+requests do not consume backend IDs or pending slots.
 
 A typical integration sequence is:
 
 1. Keep the registry alive longer than the tracker, and serialize calls to both.
-2. Call `Track` with the peer from trusted connection context and a live attachment.
-   Only forward the backend request after successful registration.
+2. Call `Track(peer, attachment, original_id, deadline)` with the peer from trusted
+   connection context, a live attachment, and an absolute monotonic deadline.
+   Only forward the backend request after successful registration. If sending
+   fails, call `Abandon` with the issued backend ID to release its pending slot.
 3. On a response, call `Complete`. Use the returned original ID and route snapshot
    in the same serial turn, or revalidate before deferred delivery. Success and
    error payloads use the same correlation mechanism; their bodies stay outside
@@ -96,6 +100,9 @@ A typical integration sequence is:
 4. After registry detach or endpoint removal, promptly pass its `CloseResult` to
    every affected tracker. `Invalidate` returns removed request snapshots in
    backend-ID order after cleanup, for the caller's own bookkeeping.
+5. Drive `Expire(now)` from the same serial context to reclaim overdue requests.
+   Consume its results only after it returns; all selected records are already
+   removed at that point.
 
 Unknown and duplicate responses are harmless. `Complete` also rechecks registry
 liveness, so an omitted or delayed invalidation cannot route a response through a
@@ -104,11 +111,43 @@ failed closure results do nothing, and snapshots claiming to close a still-live
 attachment are ignored. Returned snapshots do not grant permission to send to an
 attachment that closes after the snapshot was returned.
 
-There are no callbacks, automatic retries, timers, deadlines, or backend
-cancellation. Nonresponding requests remain pending until completion or attachment
-invalidation; the capacity limit bounds their count but does not expire them.
-Send-failure handling and timeout policy are later integration work. No JSON
-dependency, transport, or ECS infrastructure is introduced by this slice.
+### Deadlines and local termination
+
+`RequestTime` is `std::chrono::steady_clock::time_point`. The caller chooses each
+deadline and supplies `now` from the same monotonic clock. Tests can construct
+time points directly without reading a clock or sleeping. Every `Track` call must
+provide a deadline; there is no default. `Track` stores the supplied deadline without
+reading time; even a past deadline is accepted and is eligible for the next
+`Expire` call. `deadline == now` expires, and `RequestTime::max()` is an ordinary
+deadline, not a sentinel. The caller is responsible for safely computing deadlines
+within the clock's representable range.
+
+Time passing alone does not mutate the tracker. `Complete` and `Abandon` do not
+check the clock. The first processed ending consumes the request; later responses
+or cleanup calls cannot end it again. To give deadlines precedence over queued
+responses, call `Expire(now)` before processing those responses. Also drive
+expiration before admission if overdue requests should no longer occupy capacity.
+Scheduling and timeout duration policy belong to the owner, not this module.
+
+`Abandon` returns an optional `EndedRequest`; `Expire` returns a vector of them.
+Each contains the original `PendingRequest` snapshot, including its deadline,
+and a `RequestEndReason`: `kAbandoned` or `kTimedOut`. If the registry already
+closed the attachment, either path instead reports `kAttachmentClosed`, even if
+the owner missed `Invalidate`. Cleanup still releases capacity in that case.
+These are bookkeeping records, not sendable routes. Do not deliver a result for
+`kAttachmentClosed`; recheck attachment liveness before notifying a client for
+any other reason. A later closure can invalidate a previously returned snapshot.
+
+`Abandon` is a trusted owner operation using a backend ID, not a frontend
+cancellation API. Neither it nor expiration closes attachments, cancels backend
+execution, or retries a command whose effects may already have occurred. The
+frontend can reuse its original request ID after local waiting ends, but the new
+request gets a fresh backend ID so a late old response cannot match it.
+
+There are no callbacks, automatic retries, timer threads, or backend cancellation.
+Actual send-failure detection, client error encoding, and notification delivery
+remain integration work. No JSON dependency, transport, or ECS infrastructure is
+introduced by this slice.
 
 ## Host build and tests
 
@@ -121,12 +160,18 @@ cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 ```
 
-The 29 tests comprise 13 registry cases and 16 tracker cases. They cover lifecycle
+The 39 tests comprise 13 registry cases and 26 tracker cases. They cover lifecycle
 invariants, snapshot isolation, duplicate IDs, ownership, bounded capacity, ID
 exhaustion, scoped invalidation, and stale responses. A fake backend controls
 response order without knowing frontend identities. The end-to-end in-memory
 case sends `id: 1` from A and B, delivers B's response first, removes A, discards
 A's late response, and verifies that B can continue.
+
+Explicit-time tests cover inclusive deadlines, equal and out-of-order deadlines,
+time-point extremes, abandonment, capacity recovery, missed invalidation, and
+frontend ID reuse after timeout without cross-delivering a late response. All 24
+orderings of response, abandonment, expiration, and detach/invalidation are tested
+to ensure exactly one ending. No timeout test depends on wall-clock time or sleep.
 
 For AddressSanitizer and UndefinedBehaviorSanitizer on a supported host compiler:
 

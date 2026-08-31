@@ -63,6 +63,16 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
         id_exhaustion
         invalidation_never_reuses_ids
         original_id_preservation
-        shared_target_lifecycle)
+        shared_target_lifecycle
+        abandon_pending
+        abandon_unknown
+        deadline_boundary
+        deadline_extremes
+        expiry_releases_capacity
+        terminal_ordering
+        closed_attachment_termination
+        termination_never_reuses_ids
+        abandon_releases_capacity
+        deadline_snapshot)
   endif()
 endif()
