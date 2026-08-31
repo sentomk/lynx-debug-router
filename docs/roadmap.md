@@ -1,17 +1,21 @@
 # DebugRouter Roadmap
 
-Status: Android-first native lifecycle foundation implemented; the wider SDK
-design remains proposed.
+Status: Android-first native lifecycle and bounded request-correlation foundations
+implemented; the wider SDK design remains proposed.
 
-Updated: 2026-08-31.
+Updated: 2026-09-01.
 
 Current slice: a C++17 `SessionRegistry` with typed, registry-local handles,
 idempotent attach per live peer-target pair, ownership-checked detach, and scoped
-endpoint cleanup that returns closed relationship snapshots. It has deterministic
-host tests and Android NDK builds; it does not yet provide JNI, transports, CDP
-correlation, subscriptions, or backend integration. See the [README](../README.md)
-for the lifecycle contract and build instructions. ECS remains a design mindset,
-not an imposed module structure.
+endpoint cleanup that returns closed relationship snapshots. A `RequestTracker`
+now validates request ownership, maps backend IDs to original frontend IDs and
+attachments, and consumes closure results to invalidate pending work. It rechecks
+attachment liveness before returning a response route and never recycles issued
+IDs within its lifetime. Both modules have deterministic host tests and Android
+NDK builds. JNI, transports, CDP parsing/rewriting, subscriptions, deadlines, and
+backend integration remain unimplemented. See the [README](../README.md) for the
+contracts and build instructions. ECS remains a design mindset, not an imposed
+module structure.
 
 ## Direction and scope
 
@@ -168,8 +172,9 @@ consistency, ownership checks, duplicate operations, and stale-instance rejectio
 The implementation has no embedded transport or backend side effects.
 
 The initial `SessionRegistry` implements this in-memory scope using ordinary
-containers. Request cleanup and client notifications are future consumers of its
-closure results, not side effects performed by the registry.
+containers. The owner passes its closure results to `RequestTracker` for request
+cleanup. Client notifications remain future work; neither module sends messages
+or performs backend side effects.
 
 ### 3. Add request correlation and event delivery
 
@@ -202,6 +207,16 @@ whose side effects may already have occurred.
 Completion evidence: tests cover colliding frontend IDs, out-of-order responses,
 backend errors, notification fan-out, timeouts, bounded capacity, late responses,
 and peer or target removal while requests are pending.
+
+The current tracker covers the numeric correlation and lifecycle subset of this
+step, using a fake backend. Callers explicitly configure the pending capacity and
+the positive backend-ID ceiling within int32. IDs are unique across all targets
+handled by that tracker and are not reused after completion or invalidation. A
+tracker must cover the lifetime of its shared backend response source; replacing
+it requires retiring or fencing that source first. Protocol encoding, real-backend
+range validation, send failures, expiration, and event subscriptions still need
+implementation. A full pending table rejects new requests rather than growing
+without limit; it does not substitute for timeout policy.
 
 ### 4. Integrate real targets and shared debugging behavior
 
