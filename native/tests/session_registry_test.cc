@@ -47,6 +47,7 @@ void Registration() {
   SessionRegistry registry;
   CHECK(!registry.HasPeer(PeerId::kInvalid));
   CHECK(!registry.HasTarget(TargetId::kInvalid));
+  CHECK(!registry.FindTarget(TargetId::kInvalid));
   CHECK(!registry.FindAttachment(AttachmentId::kInvalid));
   const auto first_peer = registry.RegisterPeer();
   const auto second_peer = registry.RegisterPeer();
@@ -60,8 +61,48 @@ void Registration() {
   CHECK(registry.HasPeer(second_peer));
   CHECK(registry.HasTarget(first_target));
   CHECK(registry.HasTarget(second_target));
+  CHECK(registry.Targets().size() == 2);
+  CHECK(registry.FindTarget(first_target)->descriptor.template_url.empty());
   CHECK(registry.AttachmentsForPeer(first_peer).empty());
   CHECK(registry.AttachmentsForTarget(first_target).empty());
+}
+
+void TargetSnapshots() {
+  SessionRegistry registry;
+  const auto first = registry.RegisterTarget({"lynx://page/main"});
+  const auto peer = registry.RegisterPeer();
+  const auto second = registry.RegisterTarget({"lynx://page/main"});
+  const auto third = registry.RegisterTarget({"not required to be a URL"});
+  CHECK(first != second);
+  CHECK(registry.HasTarget(first));
+  CHECK(registry.FindTarget(first)->id == first);
+  CHECK(registry.FindTarget(first)->descriptor.template_url ==
+        "lynx://page/main");
+
+  auto snapshots = registry.Targets();
+  CHECK(snapshots.size() == 3);
+  CHECK(snapshots[0].id == first);
+  CHECK(snapshots[1].id == second);
+  CHECK(snapshots[2].id == third);
+  CHECK(snapshots[0].descriptor.template_url ==
+        snapshots[1].descriptor.template_url);
+  snapshots[0].descriptor.template_url = "changed copy";
+  CHECK(registry.FindTarget(first)->descriptor.template_url ==
+        "lynx://page/main");
+
+  const auto old_attachment = Attach(registry, peer, first);
+  CHECK(registry.RemoveTarget(first).closed.size() == 1);
+  CHECK(!registry.FindTarget(first));
+  CHECK(registry.Targets().size() == 2);
+  CHECK(snapshots[0].id == first);
+  CHECK(!registry.FindAttachment(old_attachment));
+
+  const auto replacement = registry.RegisterTarget({"lynx://page/main"});
+  CHECK(replacement != first);
+  CHECK(registry.FindTarget(replacement)->descriptor.template_url ==
+        "lynx://page/main");
+  CHECK(registry.Attach(peer, first).status == SessionStatus::kTargetNotFound);
+  CHECK(Attach(registry, peer, replacement) != old_attachment);
 }
 
 void AttachValidation() {
@@ -344,6 +385,7 @@ struct TestCase {
 
 const TestCase kTests[] = {
     {"registration", Registration},
+    {"target_snapshots", TargetSnapshots},
     {"attach_validation", AttachValidation},
     {"duplicate_attach", DuplicateAttach},
     {"detach_ownership", DetachOwnership},

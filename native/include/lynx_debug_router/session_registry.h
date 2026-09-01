@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace lynx::debug_router {
@@ -13,6 +14,18 @@ namespace lynx::debug_router {
 enum class PeerId : std::uint64_t { kInvalid = 0 };
 enum class TargetId : std::uint64_t { kInvalid = 0 };
 enum class AttachmentId : std::uint64_t { kInvalid = 0 };
+
+// Opaque host-provided metadata captured when one target instance is
+// registered. A template URL describes the instance but does not identify it;
+// empty and duplicate values are valid. The registry does not parse the value.
+struct TargetDescriptor {
+  std::string template_url;
+};
+
+struct Target {
+  TargetId id;
+  TargetDescriptor descriptor;
+};
 
 enum class SessionStatus {
   kOk,
@@ -64,7 +77,7 @@ class SessionRegistry final {
   // Every registration represents a new instance; it creates no attachments.
   // Returns kInvalid if the registry's ID space is exhausted.
   [[nodiscard]] PeerId RegisterPeer();
-  [[nodiscard]] TargetId RegisterTarget();
+  [[nodiscard]] TargetId RegisterTarget(TargetDescriptor descriptor = {});
 
   // At most one live attachment per (peer, target). Repeated Attach returns the
   // existing ID. Admission policy belongs to the caller; this checks liveness.
@@ -79,6 +92,10 @@ class SessionRegistry final {
 
   [[nodiscard]] bool HasPeer(PeerId peer) const;
   [[nodiscard]] bool HasTarget(TargetId target) const;
+  [[nodiscard]] std::optional<Target> FindTarget(TargetId id) const;
+  // Live target snapshots in ascending target-ID order. Modifying a returned
+  // value cannot change the registered descriptor.
+  [[nodiscard]] std::vector<Target> Targets() const;
   [[nodiscard]] std::optional<Attachment> FindAttachment(AttachmentId id) const;
   // Unknown endpoints yield empty snapshots. Results never reference storage.
   [[nodiscard]] std::vector<Attachment> AttachmentsForPeer(PeerId peer) const;
@@ -92,7 +109,7 @@ class SessionRegistry final {
 
   std::uint64_t next_id_ = 1;
   std::set<PeerId> peers_;
-  std::set<TargetId> targets_;
+  std::map<TargetId, Target> targets_;
   // A single source of relationship truth. Linear endpoint lookups keep this
   // initial slice small; secondary indexes can be added when justified.
   std::map<AttachmentId, Attachment> attachments_;

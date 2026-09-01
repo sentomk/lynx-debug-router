@@ -6,8 +6,11 @@ implemented; the wider SDK design remains proposed.
 Updated: 2026-09-01.
 
 Current slice: a C++17 `SessionRegistry` with typed, registry-local handles,
-idempotent attach per live peer-target pair, ownership-checked detach, and scoped
-endpoint cleanup that returns closed relationship snapshots. A `RequestTracker`
+immutable target registration metadata, idempotent attach per live peer-target
+pair, ownership-checked detach, and scoped endpoint cleanup that returns closed
+relationship snapshots. Target metadata currently contains the opaque template
+URL supplied by a Lynx view slot; it does not contain platform objects, callbacks,
+or a fixed protocol type. A `RequestTracker`
 now validates request ownership, maps backend IDs to original frontend IDs and
 attachments, and consumes closure results to invalidate pending work. It supports
 explicit abandonment and caller-driven expiration of monotonic deadlines. It
@@ -142,7 +145,7 @@ ownership rules, and observable outcomes of each operation.
 | Operation | Required outcome |
 |---|---|
 | Peer arrives | Record a reachable client without implicitly attaching it |
-| Target is registered | Make an App-provided target available without creating frontend relationships |
+| Target is registered | Capture host-provided metadata and make that target instance available without creating frontend relationships |
 | Attach | Validate both endpoints and access, then return a new relationship handle |
 | Detach | Validate ownership and end only the selected relationship |
 | Peer leaves | End its attachments and identify their pending work and resources for cleanup |
@@ -176,6 +179,14 @@ The initial `SessionRegistry` implements this in-memory scope using ordinary
 containers. The owner passes its closure results to `RequestTracker` for request
 cleanup. Client notifications remain future work; neither module sends messages
 or performs backend side effects.
+
+The first target descriptor stores an opaque `template_url`, matching the value
+provided by the real Lynx view message channel when it plugs a DebugRouter slot.
+The URL is descriptive rather than identifying: empty and duplicate values are
+valid, and every registration still creates a fresh target instance. Snapshot
+queries support later target discovery without retaining a View, callback, or
+legacy DebugRouter session ID. The bidirectional `(type, payload)` boundary to a
+real Lynx target remains a subsequent integration step.
 
 ### 3. Add request correlation and event delivery
 

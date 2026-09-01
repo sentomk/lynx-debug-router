@@ -6,23 +6,46 @@ broader direction.
 
 The current deliverable is a native static library, not an Android AAR or a
 working debugger. JNI, Java/Kotlin APIs, transports, subscriptions, CDP message
-parsing/rewriting, and Lynx integration are not implemented yet.
+parsing/rewriting, real target message delivery, and Lynx integration are not
+implemented yet.
 
 ## SessionRegistry
 
 The [public API](native/include/lynx_debug_router/session_registry.h) manages three
 concepts: a `PeerId` identifies a logical debugging client, a `TargetId` identifies
 a debuggable target instance, and an `AttachmentId` identifies their relationship.
-These are domain concepts, not an ECS framework decomposition.
+A `Target` snapshot combines its ID with registration metadata. These are domain
+concepts, not an ECS framework decomposition.
 
 | Operation | Contract |
 |---|---|
-| `RegisterPeer` / `RegisterTarget` | Issue a fresh typed handle; create no attachments |
+| `RegisterPeer` | Issue a fresh peer handle; create no attachments |
+| `RegisterTarget` | Capture a descriptor for a new target instance, issue a fresh target handle, and create no attachments |
 | `Attach` | Require live endpoints; return the existing attachment for a repeated live peer-target pair |
 | `Detach` | Require a live peer that owns the attachment; close only that relationship |
 | `RemovePeer` | Close its attachments; keep targets and other peers alive |
 | `RemoveTarget` | Close its attachments; keep peers and other targets alive |
-| `FindAttachment` / `AttachmentsForPeer` / `AttachmentsForTarget` | Return value snapshots, never mutable references into the registry |
+| `FindTarget` / `Targets` | Return copies of live target metadata, ordered by target ID for the collection query |
+| `FindAttachment` / `AttachmentsForPeer` / `AttachmentsForTarget` | Return attachment value snapshots, never mutable references into the registry |
+
+`TargetDescriptor` currently contains one opaque `template_url`, based on the URL
+provided when a Lynx view plugs its DebugRouter slot. The registry stores a copy
+without parsing, normalizing, or validating it. Empty strings, malformed URLs,
+and duplicate values are allowed; validation and input-size policy belong to the
+host integration. A URL describes a target but is not its identity. Registering
+two live views with the same URL creates two target IDs, and registering the same
+URL after target removal creates another fresh ID.
+
+There is no target metadata update operation in this slice. `FindTarget` and
+`Targets` return independent copies, so modifying a snapshot cannot alter the
+registered descriptor. Removing a target removes its descriptor together with
+the target identity and its attachments. Snapshots obtained before removal remain
+ordinary historical values and do not keep the target alive.
+
+The registry does not store an Android `View`, Lynx object, callback, message
+channel, or fixed protocol type. Real Lynx messages carry their own `(type,
+payload)` pair; defining that bidirectional target boundary is later work. The
+legacy DebugRouter `session_id` is not stored or treated as an attachment ID.
 
 Detach and removal return `CloseResult`: a status and the closed attachment
 snapshots with their closure reasons. Results are ordered by attachment ID. All
@@ -160,12 +183,13 @@ cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 ```
 
-The 39 tests comprise 13 registry cases and 26 tracker cases. They cover lifecycle
+The 40 tests comprise 14 registry cases and 26 tracker cases. They cover lifecycle
 invariants, snapshot isolation, duplicate IDs, ownership, bounded capacity, ID
-exhaustion, scoped invalidation, and stale responses. A fake backend controls
-response order without knowing frontend identities. The end-to-end in-memory
-case sends `id: 1` from A and B, delivers B's response first, removes A, discards
-A's late response, and verifies that B can continue.
+exhaustion, target metadata snapshots, duplicate target URLs, scoped invalidation,
+and stale responses. A fake backend controls response order without knowing
+frontend identities. The end-to-end in-memory case sends `id: 1` from A and B,
+delivers B's response first, removes A, discards A's late response, and verifies
+that B can continue.
 
 Explicit-time tests cover inclusive deadlines, equal and out-of-order deadlines,
 time-point extremes, abandonment, capacity recovery, missed invalidation, and

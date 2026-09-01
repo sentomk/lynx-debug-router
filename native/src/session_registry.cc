@@ -1,5 +1,7 @@
 #include "lynx_debug_router/session_registry.h"
 
+#include <utility>
+
 namespace lynx::debug_router {
 
 std::uint64_t SessionRegistry::AllocateId() {
@@ -19,10 +21,10 @@ PeerId SessionRegistry::RegisterPeer() {
   return id;
 }
 
-TargetId SessionRegistry::RegisterTarget() {
+TargetId SessionRegistry::RegisterTarget(TargetDescriptor descriptor) {
   const auto id = static_cast<TargetId>(AllocateId());
   if (id != TargetId::kInvalid) {
-    targets_.insert(id);
+    targets_.emplace(id, Target{id, std::move(descriptor)});
   }
   return id;
 }
@@ -88,6 +90,23 @@ bool SessionRegistry::HasPeer(PeerId peer) const {
 
 bool SessionRegistry::HasTarget(TargetId target) const {
   return targets_.find(target) != targets_.end();
+}
+
+std::optional<Target> SessionRegistry::FindTarget(TargetId id) const {
+  const auto found = targets_.find(id);
+  if (found == targets_.end()) {
+    return std::nullopt;
+  }
+  return found->second;
+}
+
+std::vector<Target> SessionRegistry::Targets() const {
+  std::vector<Target> result;
+  result.reserve(targets_.size());
+  for (const auto& [id, target] : targets_) {
+    result.push_back(target);
+  }
+  return result;
 }
 
 std::optional<Attachment> SessionRegistry::FindAttachment(

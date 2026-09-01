@@ -35,6 +35,7 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 
     add_router_test_suite(session_registry
         registration
+        target_snapshots
         attach_validation
         duplicate_attach
         detach_ownership
